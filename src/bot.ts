@@ -93,17 +93,62 @@ export const robot = (app: Probot) => {
       log.debug("compareCommits.commits:", commits)
       log.debug("compareCommits.files", changedFiles)
 
-      if (context.payload.action === 'synchronize' && commits.length >= 2) {
-        const {
-          data: { files },
-        } = await context.octokit.repos.compareCommits({
-          owner: repo.owner,
-          repo: repo.repo,
-          base: commits[commits.length - 2].sha,
-          head: commits[commits.length - 1].sha,
-        });
+      if (context.payload.action === 'synchronize') {
+        // Try to detect the last commit we reviewed (by looking for our previous review)
+        try {
+          const reviewsResp = await context.octokit.pulls.listReviews({
+            owner: repo.owner,
+            repo: repo.repo,
+            pull_number: context.pullRequest().pull_number,
+          });
 
-        changedFiles = files
+          const reviews = reviewsResp.data || [];
+          // Find the most recent review created by this bot (we mark our reviews with a body)
+          const botReview = reviews
+            .slice()
+            .reverse()
+            .find((r) => r.body && (r.body.startsWith('Code review by ChatGPT') || r.body.startsWith('LGTM')));
+
+          if (botReview?.commit_id) {
+            const {
+              data: { files, commits: newCommits },
+            } = await context.octokit.repos.compareCommits({
+              owner: repo.owner,
+              repo: repo.repo,
+              base: botReview.commit_id,
+              head: context.payload.pull_request.head.sha,
+            });
+
+            changedFiles = files;
+            commits = newCommits;
+          } else if (commits.length >= 2) {
+            // fallback: compare last two commits in the PR
+            const {
+              data: { files },
+            } = await context.octokit.repos.compareCommits({
+              owner: repo.owner,
+              repo: repo.repo,
+              base: commits[commits.length - 2].sha,
+              head: commits[commits.length - 1].sha,
+            });
+
+            changedFiles = files;
+          }
+        } catch (err) {
+          log.debug('failed to detect previous bot review, falling back', err);
+          if (commits.length >= 2) {
+            const {
+              data: { files },
+            } = await context.octokit.repos.compareCommits({
+              owner: repo.owner,
+              repo: repo.repo,
+              base: commits[commits.length - 2].sha,
+              head: commits[commits.length - 1].sha,
+            });
+
+            changedFiles = files;
+          }
+        }
       }
 
       const ignoreList = (process.env.IGNORE || process.env.ignore || '')
@@ -163,10 +208,12 @@ export const robot = (app: Probot) => {
         try {
           const res = await chat?.codeReview(patch);
           if (!res.lgtm && !!res.review_comment) {
+            const { line, side } = computeLineAndSideFromPatch(patch);
             ress.push({
               path: file.filename,
               body: res.review_comment,
-              position: patch.split('\n').length - 1,
+              line,
+              side,
             })
           }
         } catch (e) {
@@ -181,7 +228,7 @@ export const robot = (app: Probot) => {
           pull_number: context.pullRequest().pull_number,
           body: ress.length ? "Code review by ChatGPT" : "LGTM 👍",
           event: 'COMMENT',
-          commit_id: commits[commits.length - 1].sha,
+          commit_id: context.payload.pull_request.head.sha,
           comments: ress,
         });
       } catch (e) {
@@ -213,4 +260,68 @@ const matchPatterns = (patterns: string[], path: string) => {
       }
     }
   })
+}
+
+const computeLineAndSideFromPatch = (patch: string | undefined) => {
+  // Returns first suitable line number and side for a review comment.
+  // Preference order: first added line ('+' -> RIGHT), then context (' ' -> RIGHT), then deletion ('-' -> LEFT).
+  if (!patch) return { line: 1, side: 'RIGHT' as 'RIGHT' | 'LEFT' };
+
+  const lines = patch.split('\n');
+  let currentOld = 0;
+  let currentNew = 0;
+
+  // helper to parse the hunk header like: @@ -oldStart,oldCount +newStart,newCount @@
+  const parseHunkHeader = (hdr: string) => {
+    const m = hdr.match(/@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@/);
+    if (!m) return null;
+    const oldStart = parseInt(m[1], 10);
+    const newStart = parseInt(m[3], 10);
+    return { oldStart, newStart };
+  };
+
+  // track first matches
+  let firstAdded: number | null = null;
+  let firstContext: number | null = null;
+  let firstDeleted: number | null = null;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.startsWith('@@')) {
+      const parsed = parseHunkHeader(line);
+      if (parsed) {
+        currentOld = parsed.oldStart;
+        currentNew = parsed.newStart;
+      }
+      continue;
+    }
+
+    if (line.startsWith('+')) {
+      // addition: belongs to new file
+      if (firstAdded === null) firstAdded = currentNew;
+      currentNew++;
+      continue;
+    }
+
+    if (line.startsWith('-')) {
+      // deletion: belongs to old file
+      if (firstDeleted === null) firstDeleted = currentOld;
+      currentOld++;
+      continue;
+    }
+
+    // context line (starts with space or other)
+    if (line.startsWith(' ') || line.length === 0) {
+      if (firstContext === null) firstContext = currentNew;
+      currentOld++;
+      currentNew++;
+      continue;
+    }
+  }
+
+  if (firstAdded !== null) return { line: firstAdded, side: 'RIGHT' as 'RIGHT' | 'LEFT' };
+  if (firstContext !== null) return { line: firstContext, side: 'RIGHT' as 'RIGHT' | 'LEFT' };
+  if (firstDeleted !== null) return { line: firstDeleted, side: 'LEFT' as 'RIGHT' | 'LEFT' };
+
+  return { line: 1, side: 'RIGHT' as 'RIGHT' | 'LEFT' };
 }
