@@ -218,7 +218,7 @@ export const robot = (app: Probot) => {
               if (review.hunk_header) {
                 const hunkMatch = review.hunk_header.match(/@@\s+-\d+(?:,\d+)?\s+\+(\d+)(?:,(\d+))?\s+@@/);
                 if (hunkMatch) {
-                  line = parseInt(hunkMatch[1], 10);
+                  line = parseInt(hunkMatch[2], 10);
                 }
               }
 
