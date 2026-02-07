@@ -216,9 +216,14 @@ export const robot = (app: Probot) => {
 
               // Extract line number from hunk header if available
               if (review.hunk_header) {
-                const hunkMatch = review.hunk_header.match(/@@\s+-\d+(?:,\d+)?\s+\+(\d+)(?:,(\d+))?\s+@@/);
-                if (hunkMatch) {
-                  line = parseInt(hunkMatch[2], 10);
+                const c = review.hunk_header.match(/\+\s*(\d+),(\d+)/);
+                if (c) {
+                  const [, start, count] = c;
+                  line = Number(start) + Number(count) - 1;
+                }
+                else {
+                  log.error(`Failed to parse hunk header: ${review.hunk_header}`);
+                  continue;
                 }
               }
 
