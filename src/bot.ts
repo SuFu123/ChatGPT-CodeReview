@@ -204,16 +204,22 @@ export const robot = (app: Probot) => {
           );
           continue;
         }
+
         try {
-          const res = await chat?.codeReview(patch);
-          if (!res.lgtm && !!res.review_comment) {
-            const { line, side } = computeLineAndSideFromPatch(patch);
-            ress.push({
-              path: file.filename,
-              body: res.review_comment,
-              line,
-              side,
-            })
+          // Split patch into individual hunks (by @@ markers)
+          const hunks = splitPatchIntoHunks(patch);
+          
+          for (const hunk of hunks) {
+            const res = await chat?.codeReview(hunk.content);
+            if (!res.lgtm && !!res.review_comment) {
+              const { line, side } = computeLineAndSideFromPatch(hunk.content);
+              ress.push({
+                path: file.filename,
+                body: res.review_comment,
+                line: hunk.newStart + line - 1,
+                side,
+              })
+            }
           }
         } catch (e) {
           log.info(`review ${file.filename} failed`, e);
@@ -323,4 +329,48 @@ const computeLineAndSideFromPatch = (patch: string | undefined) => {
   if (firstDeleted !== null) return { line: firstDeleted, side: 'LEFT' as 'RIGHT' | 'LEFT' };
 
   return { line: 1, side: 'RIGHT' as 'RIGHT' | 'LEFT' };
+}
+
+const splitPatchIntoHunks = (patch: string): Array<{ header: string; newStart: number; content: string }> => {
+  // Split patch into individual hunks by @@ markers
+  const hunks: Array<{ header: string; newStart: number; content: string }> = [];
+  const lines = patch.split('\n');
+  let currentHunk: string[] = [];
+  let currentHeader = '';
+  let currentNewStart = 0;
+
+  const parseHunkHeader = (hdr: string) => {
+    const m = hdr.match(/@@\s+-\d+(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@/);
+    if (!m) return 0;
+    return parseInt(m[1], 10);
+  };
+
+  for (const line of lines) {
+    if (line.startsWith('@@')) {
+      // Save previous hunk if it exists
+      if (currentHunk.length > 0) {
+        hunks.push({
+          header: currentHeader,
+          newStart: currentNewStart,
+          content: currentHunk.join('\n'),
+        });
+      }
+      currentHeader = line;
+      currentNewStart = parseHunkHeader(line);
+      currentHunk = [line];
+    } else if (currentHunk.length > 0) {
+      currentHunk.push(line);
+    }
+  }
+
+  // Save the last hunk
+  if (currentHunk.length > 0) {
+    hunks.push({
+      header: currentHeader,
+      newStart: currentNewStart,
+      content: currentHunk.join('\n'),
+    });
+  }
+
+  return hunks;
 }
