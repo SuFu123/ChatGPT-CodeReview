@@ -89,10 +89,6 @@ export const robot = (app: Probot) => {
 
       let { files: changedFiles, commits } = data.data;
 
-      log.debug("compareCommits, base:", context.payload.pull_request.base.sha, "head:", context.payload.pull_request.head.sha)
-      log.debug("compareCommits.commits:", commits)
-      log.debug("compareCommits.files", changedFiles)
-
       if (context.payload.action === 'synchronize') {
         // Try to detect the last commit we reviewed (by looking for our previous review)
         try {
@@ -150,6 +146,9 @@ export const robot = (app: Probot) => {
           }
         }
       }
+
+      log.debug('changedFiles:', changedFiles);
+      log.debug
 
       const ignoreList = (process.env.IGNORE || process.env.ignore || '')
           .split('\n')
