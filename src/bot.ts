@@ -204,20 +204,29 @@ export const robot = (app: Probot) => {
           );
           continue;
         }
-
         try {
-          // Split patch into individual hunks (by @@ markers)
-          const hunks = splitPatchIntoHunks(patch);
+          const res = await chat?.codeReview(patch);
+          // res can be a single review or an array of reviews (one for each hunk)
+          const reviews = Array.isArray(res) ? res : [res];
           
-          for (const hunk of hunks) {
-            const res = await chat?.codeReview(hunk.content);
-            if (!res.lgtm && !!res.review_comment) {
-              const { line, side } = computeLineAndSideFromPatch(hunk.content);
+          for (const review of reviews) {
+            if (!review.lgtm && !!review.review_comment) {
+              let line: number | undefined;
+              let side: 'LEFT' | 'RIGHT' = 'RIGHT';
+
+              // Extract line number from hunk header if available
+              if (review.hunk_header) {
+                const hunkMatch = review.hunk_header.match(/@@\s+-\d+(?:,\d+)?\s+\+(\d+)(?:,(\d+))?\s+@@/);
+                if (hunkMatch) {
+                  line = parseInt(hunkMatch[1], 10);
+                }
+              }
+
               ress.push({
                 path: file.filename,
-                body: res.review_comment,
-                line: hunk.newStart + line - 1,
-                side,
+                body: review.review_comment,
+                line: line,
+                side: side,
               })
             }
           }
@@ -265,112 +274,4 @@ const matchPatterns = (patterns: string[], path: string) => {
       }
     }
   })
-}
-
-const computeLineAndSideFromPatch = (patch: string | undefined) => {
-  // Returns first suitable line number and side for a review comment.
-  // Preference order: first added line ('+' -> RIGHT), then context (' ' -> RIGHT), then deletion ('-' -> LEFT).
-  if (!patch) return { line: 1, side: 'RIGHT' as 'RIGHT' | 'LEFT' };
-
-  const lines = patch.split('\n');
-  let currentOld = 0;
-  let currentNew = 0;
-
-  // helper to parse the hunk header like: @@ -oldStart,oldCount +newStart,newCount @@
-  const parseHunkHeader = (hdr: string) => {
-    const m = hdr.match(/@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@/);
-    if (!m) return null;
-    const oldStart = parseInt(m[1], 10);
-    const newStart = parseInt(m[3], 10);
-    return { oldStart, newStart };
-  };
-
-  // track first matches
-  let firstAdded: number | null = null;
-  let firstContext: number | null = null;
-  let firstDeleted: number | null = null;
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (line.startsWith('@@')) {
-      const parsed = parseHunkHeader(line);
-      if (parsed) {
-        currentOld = parsed.oldStart;
-        currentNew = parsed.newStart;
-      }
-      continue;
-    }
-
-    if (line.startsWith('+')) {
-      // addition: belongs to new file
-      if (firstAdded === null) firstAdded = currentNew;
-      currentNew++;
-      continue;
-    }
-
-    if (line.startsWith('-')) {
-      // deletion: belongs to old file
-      if (firstDeleted === null) firstDeleted = currentOld;
-      currentOld++;
-      continue;
-    }
-
-    // context line (starts with space or other)
-    if (line.startsWith(' ') || line.length === 0) {
-      if (firstContext === null) firstContext = currentNew;
-      currentOld++;
-      currentNew++;
-      continue;
-    }
-  }
-
-  if (firstAdded !== null) return { line: firstAdded, side: 'RIGHT' as 'RIGHT' | 'LEFT' };
-  if (firstContext !== null) return { line: firstContext, side: 'RIGHT' as 'RIGHT' | 'LEFT' };
-  if (firstDeleted !== null) return { line: firstDeleted, side: 'LEFT' as 'RIGHT' | 'LEFT' };
-
-  return { line: 1, side: 'RIGHT' as 'RIGHT' | 'LEFT' };
-}
-
-const splitPatchIntoHunks = (patch: string): Array<{ header: string; newStart: number; content: string }> => {
-  // Split patch into individual hunks by @@ markers
-  const hunks: Array<{ header: string; newStart: number; content: string }> = [];
-  const lines = patch.split('\n');
-  let currentHunk: string[] = [];
-  let currentHeader = '';
-  let currentNewStart = 0;
-
-  const parseHunkHeader = (hdr: string) => {
-    const m = hdr.match(/@@\s+-\d+(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@/);
-    if (!m) return 0;
-    return parseInt(m[1], 10);
-  };
-
-  for (const line of lines) {
-    if (line.startsWith('@@')) {
-      // Save previous hunk if it exists
-      if (currentHunk.length > 0) {
-        hunks.push({
-          header: currentHeader,
-          newStart: currentNewStart,
-          content: currentHunk.join('\n'),
-        });
-      }
-      currentHeader = line;
-      currentNewStart = parseHunkHeader(line);
-      currentHunk = [line];
-    } else if (currentHunk.length > 0) {
-      currentHunk.push(line);
-    }
-  }
-
-  // Save the last hunk
-  if (currentHunk.length > 0) {
-    hunks.push({
-      header: currentHeader,
-      newStart: currentNewStart,
-      content: currentHunk.join('\n'),
-    });
-  }
-
-  return hunks;
 }
