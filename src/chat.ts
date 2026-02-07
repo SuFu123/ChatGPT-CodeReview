@@ -38,17 +38,23 @@ export class Chat {
     
     const jsonFormatRequirement = '\nProvide your feedback in a strict JSON format with the following structure:\n' +
         '{\n' +
-        '  "lgtm": boolean, // true if the code looks good to merge, false if there are concerns\n' +
-        '  "review_comment": string // Your detailed review comments. You can use markdown syntax in this string, but the overall response must be a valid JSON\n' +
+        '  "reviews": [\n' +
+        '    {\n' +
+        '      "hunk_header": string, // The @@ hunk header (e.g., "@@ -10,5 +10,7 @@"), optional\n' +
+        '      "lgtm": boolean, // true if this hunk looks good, false if there are concerns\n' +
+        '      "review_comment": string // Your detailed review comments for this hunk. Can use markdown syntax. Empty string if lgtm is true.\n' +
+        '    }\n' +
+        '  ]\n' +
         '}\n' +
-        'Ensure your response is a valid JSON object.\n';
+        'Review each hunk (marked by @@) separately and provide feedback for hunks that need improvement.\n' +
+        'Ensure your response is a valid JSON object with a reviews array.\n';
 
     return `${userPrompt}${jsonFormatRequirement} ${answerLanguage}:
     ${patch}
     `;
   };
 
-  public codeReview = async (patch: string): Promise<{ lgtm: boolean, review_comment: string }> => {
+  public codeReview = async (patch: string): Promise<Array<{ lgtm: boolean, review_comment: string, hunk_header?: string }> | { lgtm: boolean, review_comment: string, hunk_header?: string }> => {
     if (!patch) {
       return {
         lgtm: true,
@@ -80,10 +86,16 @@ export class Chat {
     if (res.choices.length) {
       try {
         const json = JSON.parse(res.choices[0].message.content || "");
-        return json
+        // If response has a 'reviews' array, return it directly
+        if (json.reviews && Array.isArray(json.reviews)) {
+          return json.reviews;
+        }
+        // Otherwise, treat as a single review response
+        return json;
       } catch (e) {
         return {
           lgtm: false,
+          hunk_header: patch.split('\n')[0].startsWith('@@') ? patch.split('\n')[0] : undefined,
           review_comment: res.choices[0].message.content || ""
         }
       }
